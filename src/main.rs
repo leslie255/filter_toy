@@ -395,7 +395,7 @@ fn main() {
     let event_loop = EventLoop::new().unwrap();
     #[allow(deprecated)]
     let window = event_loop
-        .create_window(Window::default_attributes().with_title("WGPU Test"))
+        .create_window(Window::default_attributes().with_title("Filter Toy"))
         .unwrap();
     let (wgpu_surface, context) = Context::for_window(wgpu_instance, &window).wait();
     let mut application = Application::new(Some(&window), wgpu_surface, &context);

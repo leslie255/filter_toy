@@ -1,0 +1,13 @@
+[package]
+name = "filter"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+wgpu = "24"
+winit = "0.30"
+cgmath = "0.18"
+pollster = "0.4"
+bytemuck = { version = "1.22", features = [ "derive" ] }
+dirs = "6"
+image = "0.25"

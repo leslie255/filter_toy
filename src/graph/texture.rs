@@ -168,7 +168,7 @@ impl<'cx> SamplerBuilder<'cx> {
         self
     }
 
-    /// For convenience sake, this actually sets 3 parameters, `address_mode_{u, v, w}`.
+    /// For convenience sake, this method actually sets the addressing modes for all 3 dimensions.
     /// Use `with_descriptor` for finer adjustments.
     pub fn clamp(mut self, address_mode: wgpu::AddressMode) -> Self {
         self.descriptor.address_mode_u = address_mode;

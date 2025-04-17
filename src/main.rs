@@ -14,9 +14,9 @@ use graph::{
 };
 
 use cgmath::*;
-use image::DynamicImage;
+use image::RgbaImage;
 use input::InputHelper;
-use utils::{Wait, time};
+use utils::Wait;
 use winit::{
     application::ApplicationHandler, event::WindowEvent, event_loop::EventLoop, window::Window,
 };
@@ -158,9 +158,10 @@ struct Application<'cx, 'window> {
     /// If the current frame was the first frame after a resize.
     is_first_frame_after_resize: bool,
     frame_counter: u64,
-    image_rectangle: Option<TexturedRectangle<'cx>>,
-    image_path: Option<PathBuf>,
     image_updated: bool,
+    image: Option<RgbaImage>,
+    image_path: Option<PathBuf>,
+    image_rectangle: Option<TexturedRectangle<'cx>>,
 }
 
 impl<'cx, 'window> Application<'cx, 'window> {
@@ -169,6 +170,10 @@ impl<'cx, 'window> Application<'cx, 'window> {
         wgpu_surface: wgpu::Surface<'window>,
         context: &'cx Context,
     ) -> Self {
+        let image_path = std::env::args().nth(1).map(PathBuf::from);
+        let image = image_path
+            .as_deref()
+            .map(|path| image::open(path).unwrap().into_rgba8());
         Self {
             window,
             window_surface: Surface::for_window(
@@ -181,15 +186,10 @@ impl<'cx, 'window> Application<'cx, 'window> {
             input_helper: InputHelper::new(),
             is_first_frame_after_resize: false,
             frame_counter: 0,
+            image_updated: image_path.is_some(),
+            image,
+            image_path,
             image_rectangle: None,
-            image_path: None,
-            image_updated: false,
-        }
-    }
-
-    fn request_redraw(&self) {
-        if let Some(window) = self.window {
-            window.request_redraw();
         }
     }
 
@@ -211,35 +211,7 @@ impl<'cx, 'window> Application<'cx, 'window> {
 
         if self.image_updated {
             self.image_updated = false;
-            'block: {
-                if self.image_path.is_none() {
-                    self.image_rectangle = None;
-                    break 'block;
-                }
-                let image_path = self.image_path.as_deref().unwrap();
-                let Ok(image) = image::open(image_path) else {
-                    println!("[INFO] Unable to open image file at path {image_path:?}");
-                    break 'block;
-                };
-                let (image, wgpu_format) = match &image {
-                    DynamicImage::ImageRgba16(_) => (image, wgpu::TextureFormat::Rgba16Float),
-                    DynamicImage::ImageRgba32F(_) => (image, wgpu::TextureFormat::Rgba32Float),
-                    _ => (image.into_rgb8().into(), wgpu::TextureFormat::Rgba8Unorm),
-                };
-                // FIXME: do this more efficiently.
-                let image_rgba = image.into_rgba8();
-                let image_size = vec2(image_rgba.width(), image_rgba.height());
-                let texture =
-                    Texture2d::new(self.context, image_size, wgpu_format);
-                texture.write(self.context, &image_rgba);
-                let rectangle = TexturedRectangle::new(
-                    self.context,
-                    &self.window_surface,
-                    texture.create_view(),
-                )
-                .with_size(image_size.map(|u| u as f32));
-                self.image_rectangle = Some(rectangle);
-            }
+            self.update_texture();
         }
         if let Some(ref mut image_rectangle) = self.image_rectangle {
             let position = point2(0.0, 0.0) - image_rectangle.size() / 2.0;
@@ -258,11 +230,47 @@ impl<'cx, 'window> Application<'cx, 'window> {
             window.pre_present_notify();
         }
 
-        self.window_surface.present()
+        self.window_surface.present();
+
+        self.is_first_frame_after_resize = false;
+        self.frame_counter = self.frame_counter.wrapping_add(1);
+    }
+
+    fn update_texture(&mut self) {
+        let Some(ref image) = self.image else {
+            self.image_rectangle = None;
+            return;
+        };
+        let image_size = vec2(image.width(), image.height());
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let texture = Texture2d::new(self.context, image_size, format);
+        texture.write(self.context, image);
+        let rectangle =
+            TexturedRectangle::new(self.context, &self.window_surface, texture.create_view())
+                .with_size(image_size.map(|u| u as f32));
+        self.image_rectangle = Some(rectangle);
     }
 
     fn window_scale_factor(&self) -> f64 {
         self.window.map_or(0.0, |window| window.scale_factor())
+    }
+
+    fn paint(&mut self) {
+        let position = self
+            .input_helper
+            .cursor_position_physical()
+            .unwrap_or(point2(0., 0.));
+        let center = position - self.window_surface.size() / 2.;
+        let center = point2(center.x, -center.y);
+        let world_coord = self.canvas.inverse_transform(center);
+        if let Some(ref mut image) = self.image {
+            let image_coord_f = vec2(world_coord.x, -world_coord.y)
+                + vec2(image.width() as f32, image.height() as f32) / 2.0;
+            let image_coord = image_coord_f.map(|f| f as u32);
+            *image.get_pixel_mut(image_coord.x, image_coord.y) = [255, 0, 255, 255].into();
+            self.image_updated = true;
+            self.draw();
+        }
     }
 }
 
@@ -278,15 +286,7 @@ impl ApplicationHandler for Application<'_, '_> {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
-                let (frame_time, ()) = time(|| self.draw());
-                self.is_first_frame_after_resize = false;
-                let frame_time_seconds = frame_time.as_secs_f64();
-                let fps = 1.0 / frame_time_seconds;
-                self.frame_counter = self.frame_counter.wrapping_add(1);
-                println!(
-                    "[INFO] frame {} time: {frame_time_seconds}s ({fps:.2} fps)",
-                    self.frame_counter
-                );
+                self.draw();
             }
             WindowEvent::Resized(physical_size) => {
                 self.is_first_frame_after_resize = true;
@@ -299,7 +299,7 @@ impl ApplicationHandler for Application<'_, '_> {
             } => {
                 self.is_first_frame_after_resize = true;
                 if self.frame_counter != 0 {
-                    self.request_redraw();
+                    self.draw();
                 }
                 self.canvas.scale_factor = scale_factor as f32;
             }
@@ -309,6 +309,9 @@ impl ApplicationHandler for Application<'_, '_> {
             } => {
                 self.input_helper
                     .notify_cursor_moved(position, self.window_scale_factor());
+                if self.input_helper.button_is_pressed(0) {
+                    self.paint();
+                }
             }
             WindowEvent::CursorEntered { device_id: _ } => {
                 self.input_helper.notify_cursor_entered();
@@ -322,6 +325,36 @@ impl ApplicationHandler for Application<'_, '_> {
                 is_synthetic: _,
             } => {
                 self.input_helper.notify_key_event(&event);
+                'block: {
+                    if !event.state.is_pressed() {
+                        break 'block;
+                    }
+                    let key_code = match event.physical_key {
+                        winit::keyboard::PhysicalKey::Code(key_code) => key_code,
+                        _ => break 'block,
+                    };
+                    match key_code {
+                        winit::keyboard::KeyCode::ArrowUp => self.canvas.move_(vec2(0.0, -12.0)),
+                        winit::keyboard::KeyCode::ArrowDown => self.canvas.move_(vec2(0.0, 12.0)),
+                        winit::keyboard::KeyCode::ArrowRight => self.canvas.move_(vec2(-12.0, 0.0)),
+                        winit::keyboard::KeyCode::ArrowLeft => self.canvas.move_(vec2(12.0, 0.0)),
+                        winit::keyboard::KeyCode::Equal | winit::keyboard::KeyCode::NumpadAdd
+                            if self.input_helper.super_is_down()
+                                | self.input_helper.control_is_down() =>
+                        {
+                            self.canvas.scale(1.0 / 12.0, point2(0.0, 0.0))
+                        }
+                        winit::keyboard::KeyCode::Minus
+                        | winit::keyboard::KeyCode::NumpadSubtract
+                            if self.input_helper.super_is_down()
+                                | self.input_helper.control_is_down() =>
+                        {
+                            self.canvas.scale(-1.0 / 12.0, point2(0.0, 0.0))
+                        }
+                        _ => (),
+                    }
+                    self.draw();
+                }
             }
             WindowEvent::MouseWheel {
                 device_id: _,
@@ -331,14 +364,20 @@ impl ApplicationHandler for Application<'_, '_> {
                 let delta = match delta {
                     winit::event::MouseScrollDelta::LineDelta(x, y) => vec2(x, y) * 12.0,
                     winit::event::MouseScrollDelta::PixelDelta(delta) => {
-                        vec2(delta.x as f32, delta.y as f32)
+                        vec2(delta.x, delta.y).map(|f| f as f32)
                     }
                 };
                 if self
                     .input_helper
                     .key_is_down(winit::keyboard::KeyCode::AltLeft)
                 {
-                    self.canvas.scale(delta.y / 100.0, point2(0.0, 0.0));
+                    let position = self
+                        .input_helper
+                        .cursor_position_physical()
+                        .unwrap_or(point2(0., 0.));
+                    let center = position - self.window_surface.size() / 2.;
+                    let center = point2(center.x, -center.y);
+                    self.canvas.scale(delta.y / 100.0, center);
                 } else {
                     self.canvas.move_(vec2(delta.x, -delta.y));
                 }
@@ -360,8 +399,16 @@ impl ApplicationHandler for Application<'_, '_> {
             }
             WindowEvent::DroppedFile(path) => {
                 self.image_updated = true;
-                self.image_path = Some(path);
-                self.draw();
+                if let Ok(image) = time!(image::open(&path)) {
+                    self.image = Some(image.into_rgba8());
+                    self.image_path = Some(path);
+                    self.draw();
+                } else {
+                    println!("[INFO] Unable to open image file at path {path:?}");
+                    self.image = None;
+                    self.image_path = None;
+                    self.draw();
+                }
             }
             _ => (),
         }
@@ -378,12 +425,15 @@ impl ApplicationHandler for Application<'_, '_> {
             winit::event::DeviceEvent::MouseMotion { delta: (dx, dy) } => {
                 if self.input_helper.button_is_pressed(2) {
                     self.canvas
-                        .move_(vec2(dx as f32, -dy as f32) * self.window_scale_factor() as f32);
+                        .move_((vec2(dx, -dy) * self.window_scale_factor()).map(|f| f as f32));
                     self.draw();
                 }
             }
             winit::event::DeviceEvent::Button { button, state } => {
                 self.input_helper.notify_button_event(button, state);
+                if button == 0 && state.is_pressed() {
+                    self.paint();
+                }
             }
             _ => (),
         }

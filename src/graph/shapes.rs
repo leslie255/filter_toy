@@ -528,7 +528,7 @@ impl<'cx> TexturedRectangle<'cx> {
         let uniform2_gamma = UniformBuffer::<f32>::new_zeroed(context);
 
         let sampler = SamplerBuilder::new(context)
-            .mag_filter(wgpu::FilterMode::Linear)
+            .mag_filter(wgpu::FilterMode::Nearest)
             .min_filter(wgpu::FilterMode::Linear)
             .clamp(wgpu::AddressMode::ClampToEdge)
             .build();

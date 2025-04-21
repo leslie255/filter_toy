@@ -40,12 +40,12 @@ impl InputHelper {
         self.downed_buttons[button as usize]
     }
 
-    pub fn cursor_position_physical(&mut self) -> Option<Point2<f32>> {
+    pub fn cursor_position_physical(&self) -> Option<Point2<f32>> {
         self.cursor_position_physical
             .map(|p| point2(p.x as f32, p.y as f32))
     }
 
-    pub fn cursor_position_logical(&mut self) -> Option<Point2<f32>> {
+    pub fn cursor_position_logical(&self) -> Option<Point2<f32>> {
         self.cursor_position_logical
             .map(|p| point2(p.x as f32, p.y as f32))
     }

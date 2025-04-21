@@ -105,7 +105,7 @@ impl Texture2d {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TextureView2d {
     /// The WGPU handle.
     pub(crate) wgpu_texture_view: wgpu::TextureView,
@@ -193,7 +193,7 @@ impl<'cx> SamplerBuilder<'cx> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Sampler {
     /// The WGPU handle.
     pub(crate) wgpu_sampler: wgpu::Sampler,

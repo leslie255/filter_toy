@@ -26,6 +26,32 @@ fn map_buffer(buffer_slice: wgpu::BufferSlice) {
     buffer_slice.map_async(wgpu::MapMode::Read, |result| result.unwrap());
 }
 
+fn paeth_filter(x: u8, left: u8, up: u8, up_left: u8) -> u8 {
+    fn paeth_predictor(left: u8, up: u8, up_left: u8) -> u8 {
+        let p = (left as i16) + (up as i16) - (up_left as i16);
+        let pa = p.abs_diff(left as i16);
+        let pb = p.abs_diff(up as i16);
+        let pc = p.abs_diff(up_left as i16);
+        if pa <= pb && pa <= pc {
+            left
+        } else if pb <= pc {
+            up
+        } else {
+            up_left
+        }
+    }
+    x.wrapping_sub(paeth_predictor(left, up, up_left))
+}
+
+fn paeth_filter_4(x: [u8; 4], left: [u8; 4], up: [u8; 4], up_left: [u8; 4]) -> [u8; 4] {
+    [
+        paeth_filter(x[0], left[0], up[0], up_left[0]),
+        paeth_filter(x[1], left[1], up[1], up_left[1]),
+        paeth_filter(x[2], left[2], up[2], up_left[2]),
+        paeth_filter(x[3], left[3], up[3], up_left[3]),
+    ]
+}
+
 /// `width * target_pixel_byte_cost` must be a multiple of `256`. This is required because `copy_texture_to_buffer` requires
 /// texture with bytes per row of multiple of `256`.
 /// Texture also cannot be in any compressed formats.
@@ -193,7 +219,7 @@ impl<'cx, 'window> Application<'cx, 'window> {
         }
     }
 
-    fn draw(&mut self) {
+    fn redraw_frame(&mut self) {
         self.window_surface.begin_drawing();
 
         let mut encoder = self
@@ -256,21 +282,49 @@ impl<'cx, 'window> Application<'cx, 'window> {
     }
 
     fn paint(&mut self) {
+        let cursor_position = self.cursor_position_centered();
+        let world_coord = self.canvas.inverse_transform(cursor_position);
+        let Some(ref mut image) = self.image else {
+            return;
+        };
+        let image_coord = vec2(world_coord.x, -world_coord.y)
+            + vec2(image.width() as f32, image.height() as f32) / 2.0;
+        let image_coord_u = image_coord.map(|f| f as u32);
+        let radius = (u32::min(image.width(), image.height()) as f32 / 10.0).max(1.0);
+        let min = image_coord_u.map(|u| u.saturating_sub(radius as u32));
+        let max = image_coord_u.map(|u| u.saturating_add(radius as u32));
+        for y in min.y..=max.y {
+            for x in min.x..=max.x {
+                let r = vec2(x as f32, y as f32).distance(image_coord);
+                if r > radius {
+                    continue;
+                }
+                let left = image
+                    .get_pixel_checked(x.wrapping_sub(1), y)
+                    .map_or([0; 4].into(), |rgba| *rgba);
+                let up = image
+                    .get_pixel_checked(x, y.wrapping_sub(1))
+                    .map_or([0; 4].into(), |rgba| *rgba);
+                let left_up = image
+                    .get_pixel_checked(x.wrapping_sub(1), y.wrapping_sub(1))
+                    .map_or([0; 4].into(), |rgba| *rgba);
+                let Some(pixel) = image.get_pixel_mut_checked(x, y) else {
+                    continue;
+                };
+                *pixel = paeth_filter_4(pixel.0, left.0, up.0, left_up.0).into();
+            }
+        }
+        self.image_updated = true;
+        self.redraw_frame();
+    }
+
+    fn cursor_position_centered(&self) -> Point2<f32> {
         let position = self
             .input_helper
             .cursor_position_physical()
             .unwrap_or(point2(0., 0.));
         let center = position - self.window_surface.size() / 2.;
-        let center = point2(center.x, -center.y);
-        let world_coord = self.canvas.inverse_transform(center);
-        if let Some(ref mut image) = self.image {
-            let image_coord_f = vec2(world_coord.x, -world_coord.y)
-                + vec2(image.width() as f32, image.height() as f32) / 2.0;
-            let image_coord = image_coord_f.map(|f| f as u32);
-            *image.get_pixel_mut(image_coord.x, image_coord.y) = [255, 0, 255, 255].into();
-            self.image_updated = true;
-            self.draw();
-        }
+        point2(center.x, -center.y)
     }
 }
 
@@ -286,7 +340,7 @@ impl ApplicationHandler for Application<'_, '_> {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::RedrawRequested => {
-                self.draw();
+                self.redraw_frame();
             }
             WindowEvent::Resized(physical_size) => {
                 self.is_first_frame_after_resize = true;
@@ -299,7 +353,7 @@ impl ApplicationHandler for Application<'_, '_> {
             } => {
                 self.is_first_frame_after_resize = true;
                 if self.frame_counter != 0 {
-                    self.draw();
+                    self.redraw_frame();
                 }
                 self.canvas.scale_factor = scale_factor as f32;
             }
@@ -309,9 +363,9 @@ impl ApplicationHandler for Application<'_, '_> {
             } => {
                 self.input_helper
                     .notify_cursor_moved(position, self.window_scale_factor());
-                if self.input_helper.button_is_pressed(0) {
-                    self.paint();
-                }
+                // if self.input_helper.button_is_pressed(0) {
+                //     self.paint();
+                // }
             }
             WindowEvent::CursorEntered { device_id: _ } => {
                 self.input_helper.notify_cursor_entered();
@@ -353,7 +407,7 @@ impl ApplicationHandler for Application<'_, '_> {
                         }
                         _ => (),
                     }
-                    self.draw();
+                    self.redraw_frame();
                 }
             }
             WindowEvent::MouseWheel {
@@ -371,43 +425,33 @@ impl ApplicationHandler for Application<'_, '_> {
                     .input_helper
                     .key_is_down(winit::keyboard::KeyCode::AltLeft)
                 {
-                    let position = self
-                        .input_helper
-                        .cursor_position_physical()
-                        .unwrap_or(point2(0., 0.));
-                    let center = position - self.window_surface.size() / 2.;
-                    let center = point2(center.x, -center.y);
+                    let center = self.cursor_position_centered();
                     self.canvas.scale(delta.y / 100.0, center);
                 } else {
                     self.canvas.move_(vec2(delta.x, -delta.y));
                 }
-                self.draw();
+                self.redraw_frame();
             }
             WindowEvent::PinchGesture {
                 device_id: _,
                 delta,
                 phase: _,
             } => {
-                let position = self
-                    .input_helper
-                    .cursor_position_physical()
-                    .unwrap_or(point2(0., 0.));
-                let center = position - self.window_surface.size() / 2.;
-                let center = point2(center.x, -center.y);
+                let center = self.cursor_position_centered();
                 self.canvas.scale(delta as f32, center);
-                self.draw();
+                self.redraw_frame();
             }
             WindowEvent::DroppedFile(path) => {
                 self.image_updated = true;
-                if let Ok(image) = time!(image::open(&path)) {
+                if let Ok(image) = image::open(&path) {
                     self.image = Some(image.into_rgba8());
                     self.image_path = Some(path);
-                    self.draw();
+                    self.redraw_frame();
                 } else {
                     println!("[INFO] Unable to open image file at path {path:?}");
                     self.image = None;
                     self.image_path = None;
-                    self.draw();
+                    self.redraw_frame();
                 }
             }
             _ => (),
@@ -426,7 +470,7 @@ impl ApplicationHandler for Application<'_, '_> {
                 if self.input_helper.button_is_pressed(2) {
                     self.canvas
                         .move_((vec2(dx, -dy) * self.window_scale_factor()).map(|f| f as f32));
-                    self.draw();
+                    self.redraw_frame();
                 }
             }
             winit::event::DeviceEvent::Button { button, state } => {

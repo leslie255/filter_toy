@@ -5,7 +5,7 @@ use super::{
     buffer::{IndexBuffer, UniformBuffer, Vertex2d, Vertex2dUV, VertexBuffer},
     context::{Context, Surface},
     pipeline::PipelineBuilder,
-    texture::{SamplerBuilder, Texture2d, TextureView2d},
+    texture::{Sampler, SamplerBuilder, Texture2d, TextureView2d},
 };
 use crate::include_wgsl;
 
@@ -516,10 +516,13 @@ pub struct TexturedRectangle<'cx> {
 
     pub(crate) size: Vector2<f32>,
     pub(crate) gamma: f32,
+    pub(crate) texture: TextureView2d,
+    pub(crate) sampler: Sampler,
+    pub(crate) bind_group_needs_update: bool,
 }
 
 impl<'cx> TexturedRectangle<'cx> {
-    pub fn new(context: &'cx Context, surface: &Surface, texture_view: TextureView2d) -> Self {
+    pub fn new(context: &'cx Context, surface: &Surface, texture: TextureView2d) -> Self {
         let vertex_buffer = VertexBuffer::new_initialized(context, &SQUARE_VERTICES_UV);
         let index_buffer = IndexBuffer::new_initialized(context, &SQUARE_INDICES);
 
@@ -540,7 +543,7 @@ impl<'cx> TexturedRectangle<'cx> {
             builder.bind_resource(0, &uniform0_model_view);
             builder.bind_resource(1, &uniform1_projection);
             builder.bind_resource(2, &uniform2_gamma);
-            builder.bind_resource(3, &texture_view);
+            builder.bind_resource(3, &texture);
             builder.bind_resource(4, &sampler);
             builder.add_vertex_buffer(&vertex_buffer);
             builder.build()
@@ -556,7 +559,7 @@ impl<'cx> TexturedRectangle<'cx> {
             builder.bind_resource(0, &uniform0_model_view);
             builder.bind_resource(1, &uniform1_projection);
             builder.bind_resource(2, &uniform2_gamma);
-            builder.bind_resource(3, &texture_view);
+            builder.bind_resource(3, &texture);
             builder.bind_resource(4, &sampler);
             builder.build()
         };
@@ -573,6 +576,9 @@ impl<'cx> TexturedRectangle<'cx> {
             uniform2_gamma,
             size: vec2(100.0, 100.0),
             gamma: 2.2,
+            texture,
+            sampler,
+            bind_group_needs_update: false,
         }
     }
 
@@ -594,6 +600,11 @@ impl<'cx> TexturedRectangle<'cx> {
         render_pass: &mut wgpu::RenderPass,
         model: Matrix4<f32>,
     ) {
+        if self.bind_group_needs_update {
+            self.bind_group_needs_update = false;
+            self.update_bind_group();
+        }
+
         render_pass.push_debug_group(&self.debug_group_name());
 
         // Pipeline.
@@ -641,6 +652,29 @@ impl<'cx> TexturedRectangle<'cx> {
     pub fn with_gamma(mut self, size: f32) -> Self {
         *self.gamma_mut() = size;
         self
+    }
+
+    pub fn texture(&self) -> &TextureView2d {
+        &self.texture
+    }
+
+    pub fn texture_mut(&mut self) -> &mut TextureView2d {
+        self.bind_group_needs_update = true;
+        &mut self.texture
+    }
+
+    pub(crate) fn update_bind_group(&mut self) {
+        let bind_group = {
+            let layout = self.render_pipeline.get_bind_group_layout(0);
+            let mut builder = BindGroupBuilder::new(self.context, &layout);
+            builder.bind_resource(0, &self.uniform0_model_view);
+            builder.bind_resource(1, &self.uniform1_projection);
+            builder.bind_resource(2, &self.uniform2_gamma);
+            builder.bind_resource(3, &self.texture);
+            builder.bind_resource(4, &self.sampler);
+            builder.build()
+        };
+        self.bind_group = bind_group;
     }
 }
 
